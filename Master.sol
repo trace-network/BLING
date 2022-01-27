@@ -5,13 +5,15 @@ import "./Collection.sol";
 pragma solidity 0.7.6;
 pragma experimental ABIEncoderV2;
 
-contract Bling_Master {
+contract BlingMaster {
     // Include safemanth library
     using SafeMathUpgradeable for uint256;
 
     address payable treasury;
     address payable nftmarket;
     address payable admin;
+
+    address payable paymentAddressFactory;
 
     struct collectionInfo {
         // the collection name
@@ -24,12 +26,15 @@ contract Bling_Master {
         string[] properties;
         // the contract address
         address myContract;
+        // Payment split
+        address payable paymentSplit;
     }
-
-    constructor(address payable _treasury, address payable _nftMarket) {
+ 
+    constructor(address payable _treasury, address payable _nftMarket, address payable _paymentSplit) {
         treasury = _treasury;
         nftmarket = _nftMarket;
         admin = msg.sender;
+        paymentAddressFactory = _paymentSplit;
     }
 
     // collection info mapping
@@ -37,6 +42,7 @@ contract Bling_Master {
     // get collection
     mapping(address => mapping(string => address)) public getCollection;
     mapping(address => string) public getCode;
+    mapping(address => string) public brandName;
 
     mapping(address => bool) public whitelisted;
 
@@ -47,8 +53,11 @@ contract Bling_Master {
         string ColDescription,
         string[] ColProperties,
         address myContract,
-        uint256 quantity
+        uint256 quantity,
+        address payable split
     );
+
+    event Whitelist(address brand, string name, bool status);
 
     event CollectionUpdated(
         address creator,
@@ -57,7 +66,8 @@ contract Bling_Master {
         string ColDescription,
         string[] ColProperties,
         address myContract,
-        uint256 quantity
+        uint256 quantity,
+        address payable split
     );
 
     /**
@@ -66,7 +76,7 @@ contract Bling_Master {
     modifier onlyWhitelistedUsers() {
         require(
             whitelisted[msg.sender],
-            "Bling_Master: Address Not Authorized"
+            "BlingMaster:ADDRESS_NOT_WHITELISTED"
         );
         _;
     }
@@ -77,7 +87,7 @@ contract Bling_Master {
     modifier onlyOwner() {
         require(
             IAdminRole(treasury).isAdmin(msg.sender),
-            "Bling_Master: Address Not Authorized"
+            "BlingMaster:ADDRESS_NOT_AUTHORIZED"
         );
         _;
     }
@@ -85,12 +95,15 @@ contract Bling_Master {
     /**
      * @notice Allows foundation admin to whitelist users
      */
-    function updateWhitelist(address[] memory brands, bool[] memory status)
-        public
-        onlyOwner
-    {
+    function updateWhitelist(
+        address[] memory brands,
+        string[] memory name,
+        bool[] memory status
+    ) public onlyOwner {
         for (uint256 i; i < brands.length; i++) {
             whitelisted[brands[i]] = status[i];
+            brandName[brands[i]] = name[i];
+            emit Whitelist(brands[i], name[i], status[i]);
         }
     }
 
@@ -99,32 +112,37 @@ contract Bling_Master {
         string memory _colName,
         string memory _colDescription,
         uint256 _colQuantity,
-        string[] memory _colProperties
-    ) external onlyWhitelistedUsers returns (address collection) {
-        // Add require condition to check
+        string[] memory _colProperties,
+        address payable _beneficiary,
+        bytes memory paymentAddressCallData
+    ) external onlyWhitelistedUsers returns (address collection, address payable split) {
         require(
             getCollection[msg.sender][_colCode] == address(0),
-            "Bling_Master: COLLECTION_EXISTS"
-        ); // single check is sufficient
+            "BlingMaster:COLLECTION_EXISTS"
+        );
 
-        bytes memory bytecode = type(Bling_Collection).creationCode;
+        bytes memory bytecode = type(BlingCollection).creationCode;
         bytes32 salt = keccak256(abi.encodePacked(msg.sender, _colCode));
 
         assembly {
             collection := create2(0, add(bytecode, 32), mload(bytecode), salt)
         }
 
+        if(_beneficiary == address(0))
+            split = getPaymentAddress(paymentAddressCallData);
+        else
+            split = _beneficiary;
+
         getCollection[msg.sender][_colCode] = collection;
         getCode[collection] = _colCode;
-        Bling_Collection(collection).initialize(
+        BlingCollection(collection).initialize(
             treasury,
             _colName,
-            _colName,
+            _colCode,
             _colQuantity,
             msg.sender
         );
-        Bling_Collection(collection).adminUpdateConfig(
-            nftmarket,
+        BlingCollection(collection).adminUpdateConfig(
             "https://ipfs.io/ipfs/"
         );
         collections[msg.sender][_colCode] = collectionInfo({
@@ -132,7 +150,8 @@ contract Bling_Master {
             quantity: _colQuantity,
             description: _colDescription,
             properties: _colProperties,
-            myContract: collection
+            myContract: collection,
+            paymentSplit: split
         });
 
         emit CollectionCreated(
@@ -142,7 +161,8 @@ contract Bling_Master {
             _colDescription,
             _colProperties,
             collection,
-            _colQuantity
+            _colQuantity,
+            split
         );
     }
 
@@ -152,25 +172,35 @@ contract Bling_Master {
         string memory _colName,
         string memory _colDescription,
         string[] memory _colProperties,
-        uint256 _totalSupply
+        uint256 _totalSupply,
+        address payable _beneficiary,
+        bytes memory paymentAddressCallData
     ) external onlyWhitelistedUsers {
         collectionInfo storage collection = collections[msg.sender][_colCode];
 
         require(
             getCollection[msg.sender][_colCode] == _colContract,
-            "Bling_Master: COLLECTION_NOT_EXISTS"
+            "BlingMaster:COLLECTION_NOT_EXISTS"
         );
         // Add require condition to check
         require(
-            (Bling_Collection(_colContract).getNextTokenId() - 1) == 0,
-            "Bling_Master: UPDATE_NOT_ALLOWED"
+            (BlingCollection(_colContract).getNextTokenId() - 1) == 0,
+            "BlingMaster:COLLECTION_UPDATE_NOT_ALLOWED"
         ); // single check is sufficient
+
+        address payable _split;
+
+        if(_beneficiary == address(0))
+            _split = getPaymentAddress(paymentAddressCallData);
+        else
+            _split = _beneficiary;
 
         collection.name = _colName;
         collection.description = _colDescription;
         collection.properties = _colProperties;
         collection.quantity = _totalSupply;
-        Bling_Collection(_colContract).masterUpdateSupply(_totalSupply);
+        collection.paymentSplit = _split;
+        BlingCollection(_colContract).adminUpdateSupply(_totalSupply);
 
         emit CollectionUpdated(
             msg.sender,
@@ -179,7 +209,8 @@ contract Bling_Master {
             _colDescription,
             _colProperties,
             _colContract,
-            _totalSupply
+            _totalSupply,
+            _split
         );
     }
 
@@ -205,13 +236,25 @@ contract Bling_Master {
     function updateAdminConfig(
         address _colContract,
         string memory _colCode,
-        address _nftMarket,
         string memory baseURI
     ) public onlyOwner {
         require(
             getCollection[msg.sender][_colCode] == _colContract,
-            "Bling_Master: COLLECTION_NOT_EXISTS"
+            "BlingMaster:COLLECTION_NOT_EXISTS"
         );
-        Bling_Collection(_colContract).adminUpdateConfig(_nftMarket, baseURI);
+        BlingCollection(_colContract).adminUpdateConfig(
+            baseURI);
+    }
+
+    function getPaymentAddress(bytes memory paymentAddressCallData) public returns(address payable split) {
+        (bool success, bytes memory returndata) = paymentAddressFactory.call{value: 0}(
+            paymentAddressCallData
+        );
+
+        if (success) {
+            assembly {
+                split := mload(add(returndata, 32))
+            }
+        }
     }
 }

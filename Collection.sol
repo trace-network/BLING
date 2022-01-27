@@ -1639,6 +1639,9 @@ contract ERC721Upgradeable is
     // Mapping from owner to operator approvals
     mapping(address => mapping(address => bool)) private _operatorApprovals;
 
+    //Mapping from tokenId to Royalty
+    mapping(uint256 => uint256) internal _tokenRoyaltys;
+
     // Token name
     string private _name;
 
@@ -1649,7 +1652,7 @@ contract ERC721Upgradeable is
     mapping(uint256 => string) internal _tokenURIs;
 
     // Token totalSupply
-    uint256 private _supply;
+    uint256 internal _supply;
 
     // Base URI
     string private _baseURI;
@@ -1699,10 +1702,10 @@ contract ERC721Upgradeable is
         __Context_init_unchained();
         __ERC165_init_unchained();
         __ERC721_init_unchained(name_, symbol_);
-        _supply = supply_;
+        _updateSupply(supply_);
     }
 
-    function _updateSupply(uint256 supply_) public {
+    function _updateSupply(uint256 supply_) internal {
         _supply = supply_;
     }
 
@@ -1812,7 +1815,6 @@ contract ERC721Upgradeable is
         // _tokenOwners are indexed by tokenIds, so .length() returns the number of tokenIds
         if (_supply == 0) return _tokenOwners.length();
         return _supply;
-        //return _tokenOwners.length();
     }
 
     /**
@@ -2050,6 +2052,16 @@ contract ERC721Upgradeable is
         emit Transfer(address(0), to, tokenId);
     }
 
+    /** 
+     * @dev sets royalty for tokenId
+     */
+    function _setTokenRoyalty(
+        uint256 tokenId, uint256 royalty
+    ) internal {
+        _tokenRoyaltys[tokenId] = royalty;
+        
+    }
+
     /**
      * @dev Destroys `tokenId`.
      * The approval is cleared when the token is burned.
@@ -2127,10 +2139,6 @@ contract ERC721Upgradeable is
         internal
         virtual
     {
-        require(
-            _exists(tokenId),
-            "ERC721Metadata: URI set of nonexistent token"
-        );
         _tokenURIs[tokenId] = _tokenURI;
     }
 
@@ -2277,33 +2285,6 @@ abstract contract FoundationAdminRole is FoundationTreasuryNode {
     }
 }
 
-// File contracts/interfaces/IOperatorRole.sol
-
-pragma solidity ^0.7.0;
-
-/**
- * @notice Interface for OperatorRole which wraps a role from
- * OpenZeppelin's AccessControl for easy integration.
- */
-interface IOperatorRole {
-    function isOperator(address account) external view returns (bool);
-}
-
-// File contracts/roles/FoundationOperatorRole.sol
-
-pragma solidity ^0.7.0;
-
-/**
- * @notice Allows a contract to leverage the operator role defined by the Foundation treasury.
- */
-abstract contract FoundationOperatorRole is FoundationTreasuryNode {
-    // This file uses 0 data slots (other than what's included via FoundationTreasuryNode)
-
-    function _isFoundationOperator() internal view returns (bool) {
-        return IOperatorRole(getFoundationTreasury()).isOperator(msg.sender);
-    }
-}
-
 // File contracts/mixins/HasSecondarySaleFees.sol
 
 pragma solidity ^0.7.0;
@@ -2334,7 +2315,7 @@ abstract contract HasSecondarySaleFees is Initializable, ERC165Upgradeable {
         virtual
         returns (address payable[] memory);
 
-    function getFeeBps(uint256 id)
+    function getFeeBps(address nftMarket, uint256 id)
         public
         view
         virtual
@@ -2360,7 +2341,7 @@ abstract contract NFT721Core {
 pragma solidity ^0.7.0;
 
 interface IFNDNFTMarket {
-    function getFeeConfig()
+    function getFeeConfig(address, uint256)
         external
         view
         returns (
@@ -2368,104 +2349,13 @@ interface IFNDNFTMarket {
             uint256 secondaryF8nFeeBasisPoints,
             uint256 secondaryCreatorFeeBasisPoints
         );
-}
-
-// File @openzeppelin/contracts/cryptography/ECDSA.sol@v3.1.0-solc-0.7
-
-pragma solidity ^0.7.0;
-
-/**
- * @dev Elliptic Curve Digital Signature Algorithm (ECDSA) operations.
- *
- * These functions can be used to verify that a message was signed by the holder
- * of the private keys of a given address.
- */
-library ECDSA {
-    /**
-     * @dev Returns the address that signed a hashed message (`hash`) with
-     * `signature`. This address can then be used for verification purposes.
-     *
-     * The `ecrecover` EVM opcode allows for malleable (non-unique) signatures:
-     * this function rejects them by requiring the `s` value to be in the lower
-     * half order, and the `v` value to be either 27 or 28.
-     *
-     * IMPORTANT: `hash` _must_ be the result of a hash operation for the
-     * verification to be secure: it is possible to craft signatures that
-     * recover to arbitrary addresses for non-hashed data. A safe way to ensure
-     * this is by receiving a hash of the original message (which may otherwise
-     * be too long), and then calling {toEthSignedMessageHash} on it.
-     */
-    function recover(bytes32 hash, bytes memory signature)
-        internal
-        pure
-        returns (address)
-    {
-        // Check the signature length
-        if (signature.length != 65) {
-            revert("ECDSA: invalid signature length");
-        }
-
-        // Divide the signature in r, s and v variables
-        bytes32 r;
-        bytes32 s;
-        uint8 v;
-
-        // ecrecover takes the signature parameters, and the only way to get them
-        // currently is to use assembly.
-        // solhint-disable-next-line no-inline-assembly
-        assembly {
-            r := mload(add(signature, 0x20))
-            s := mload(add(signature, 0x40))
-            v := byte(0, mload(add(signature, 0x60)))
-        }
-
-        // EIP-2 still allows signature malleability for ecrecover(). Remove this possibility and make the signature
-        // unique. Appendix F in the Ethereum Yellow paper (https://ethereum.github.io/yellowpaper/paper.pdf), defines
-        // the valid range for s in (281): 0 < s < secp256k1n ÷ 2 + 1, and for v in (282): v ∈ {27, 28}. Most
-        // signatures from current libraries generate a unique signature with an s-value in the lower half order.
-        //
-        // If your library generates malleable signatures, such as s-values in the upper range, calculate a new s-value
-        // with 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141 - s1 and flip v from 27 to 28 or
-        // vice versa. If your library also generates signatures with 0/1 for v instead 27/28, add 27 to v to accept
-        // these malleable signatures as well.
-        if (
-            uint256(s) >
-            0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0
-        ) {
-            revert("ECDSA: invalid signature 's' value");
-        }
-
-        if (v != 27 && v != 28) {
-            revert("ECDSA: invalid signature 'v' value");
-        }
-
-        // If the signature is valid (and not malleable), return the signer address
-        address signer = ecrecover(hash, v, r, s);
-        require(signer != address(0), "ECDSA: invalid signature");
-
-        return signer;
-    }
-
-    /**
-     * @dev Returns an Ethereum Signed Message, created from a `hash`. This
-     * replicates the behavior of the
-     * https://github.com/ethereum/wiki/wiki/JSON-RPC#eth_sign[`eth_sign`]
-     * JSON-RPC method.
-     *
-     * See {recover}.
-     */
-    function toEthSignedMessageHash(bytes32 hash)
-        internal
-        pure
-        returns (bytes32)
-    {
-        // 32 is the length in bytes of hash,
-        // enforced by the type signature above
-        return
-            keccak256(
-                abi.encodePacked("\x19Ethereum Signed Message:\n32", hash)
-            );
-    }
+    function getFoundationFees() 
+        external 
+        view 
+        returns(
+            uint256 primaryF8nFeeBasisPoints,
+            uint256 secondaryF8nFeeBasisPoints
+        );
 }
 
 // File @openzeppelin/contracts/utils/Address.sol@v3.1.0-solc-0.7
@@ -2650,41 +2540,6 @@ library Address {
     }
 }
 
-// File @openzeppelin/contracts/utils/Strings.sol@v3.1.0-solc-0.7
-
-pragma solidity ^0.7.0;
-
-/**
- * @dev String operations.
- */
-library Strings {
-    /**
-     * @dev Converts a `uint256` to its ASCII `string` representation.
-     */
-    function toString(uint256 value) internal pure returns (string memory) {
-        // Inspired by OraclizeAPI's implementation - MIT licence
-        // https://github.com/oraclize/ethereum-api/blob/b42146b063c7d6ee1358846c198246239e9360e8/oraclizeAPI_0.4.25.sol
-
-        if (value == 0) {
-            return "0";
-        }
-        uint256 temp = value;
-        uint256 digits;
-        while (temp != 0) {
-            digits++;
-            temp /= 10;
-        }
-        bytes memory buffer = new bytes(digits);
-        uint256 index = digits - 1;
-        temp = value;
-        while (temp != 0) {
-            buffer[index--] = bytes1(uint8(48 + (temp % 10)));
-            temp /= 10;
-        }
-        return string(buffer);
-    }
-}
-
 // File contracts/interfaces/IERC1271.sol
 
 pragma solidity ^0.7.0;
@@ -2707,98 +2562,6 @@ interface IERC1271 {
         returns (bytes4 magicValue);
 }
 
-// File contracts/mixins/AccountMigration.sol
-
-pragma solidity ^0.7.0;
-
-/**
- * @notice Checks for a valid signature authorizing the migration of an account to a new address.
- * @dev This is shared by both the FNDNFT721 and FNDNFTMarket, and the same signature authorizes both.
- */
-abstract contract AccountMigration is FoundationOperatorRole {
-    // From https://github.com/OpenZeppelin/openzeppelin-contracts/blob/v4.1.0/contracts/utils/cryptography
-    function _isValidSignatureNow(
-        address signer,
-        bytes32 hash,
-        bytes memory signature
-    ) private view returns (bool) {
-        if (Address.isContract(signer)) {
-            try IERC1271(signer).isValidSignature(hash, signature) returns (
-                bytes4 magicValue
-            ) {
-                return magicValue == IERC1271(signer).isValidSignature.selector;
-            } catch {
-                return false;
-            }
-        } else {
-            return ECDSA.recover(hash, signature) == signer;
-        }
-    }
-
-    // From https://ethereum.stackexchange.com/questions/8346/convert-address-to-string
-    function _toAsciiString(address x) private pure returns (string memory) {
-        bytes memory s = new bytes(42);
-        s[0] = "0";
-        s[1] = "x";
-        for (uint256 i = 0; i < 20; i++) {
-            bytes1 b = bytes1(uint8(uint256(uint160(x)) / (2**(8 * (19 - i)))));
-            bytes1 hi = bytes1(uint8(b) / 16);
-            bytes1 lo = bytes1(uint8(b) - 16 * uint8(hi));
-            s[2 * i + 2] = _char(hi);
-            s[2 * i + 3] = _char(lo);
-        }
-        return string(s);
-    }
-
-    function _char(bytes1 b) private pure returns (bytes1 c) {
-        if (uint8(b) < 10) return bytes1(uint8(b) + 0x30);
-        else return bytes1(uint8(b) + 0x57);
-    }
-
-    // From https://github.com/OpenZeppelin/openzeppelin-contracts/blob/v4.1.0/contracts/utils/cryptography/ECDSA.sol
-    // Modified to accept messages (instead of the message hash)
-    function _toEthSignedMessage(bytes memory message)
-        private
-        pure
-        returns (bytes32)
-    {
-        return
-            keccak256(
-                abi.encodePacked(
-                    "\x19Ethereum Signed Message:\n",
-                    Strings.toString(message.length),
-                    message
-                )
-            );
-    }
-}
-
-// File contracts/libraries/AddressLibrary.sol
-
-pragma solidity ^0.7.0;
-
-/**
- * @dev Named this way to avoid conflicts with `Address` from OZ.
- */
-library AddressLibrary {
-    using Address for address;
-
-    function functionCallAndReturnAddress(
-        address paymentAddressFactory,
-        bytes memory paymentAddressCallData
-    ) internal returns (address payable result) {
-        bytes memory returnData = paymentAddressFactory.functionCall(
-            paymentAddressCallData
-        );
-
-        // Skip the length at the start of the bytes array and return the data, casted to an address
-        // solhint-disable-next-line no-inline-assembly
-        assembly {
-            result := mload(add(returnData, 32))
-        }
-    }
-}
-
 // File contracts/mixins/NFT721Creator.sol
 
 pragma solidity ^0.7.0;
@@ -2806,13 +2569,7 @@ pragma solidity ^0.7.0;
 /**
  * @notice Allows each token to be associated with a creator.
  */
-abstract contract NFT721Creator is
-    Initializable,
-    AccountMigration,
-    ERC721Upgradeable
-{
-    using AddressLibrary for address;
-
+abstract contract NFT721Creator is Initializable, ERC721Upgradeable {
     mapping(uint256 => address payable) private tokenIdToCreator;
 
     /**
@@ -2830,24 +2587,6 @@ abstract contract NFT721Creator is
         address indexed toPaymentAddress,
         uint256 indexed tokenId
     );
-    event NFTCreatorMigrated(
-        uint256 indexed tokenId,
-        address indexed originalAddress,
-        address indexed newAddress
-    );
-    event NFTOwnerMigrated(
-        uint256 indexed tokenId,
-        address indexed originalAddress,
-        address indexed newAddress
-    );
-    event PaymentAddressMigrated(
-        uint256 indexed tokenId,
-        address indexed originalAddress,
-        address indexed newAddress,
-        address originalPaymentAddress,
-        address newPaymentAddress
-    );
-
     /*
      * bytes4(keccak256('tokenCreator(uint256)')) == 0x40c1a064
      */
@@ -2969,27 +2708,6 @@ abstract contract NFT721Market is
 {
     using AddressUpgradeable for address;
 
-    event NFTMarketUpdated(address indexed nftMarket);
-
-    IFNDNFTMarket private nftMarket;
-
-    /**
-     * @notice Returns the address of the Foundation NFTMarket contract.
-     */
-    function getNFTMarket() public view returns (address) {
-        return address(nftMarket);
-    }
-
-    function _updateNFTMarket(address _nftMarket) internal {
-        require(
-            _nftMarket.isContract(),
-            "NFT721Market: Market address is not a contract"
-        );
-        nftMarket = IFNDNFTMarket(_nftMarket);
-
-        emit NFTMarketUpdated(_nftMarket);
-    }
-
     /**
      * @notice Returns an array of recipient addresses to which fees should be sent.
      * The expected fee amount is communicated with `getFeeBps`.
@@ -3000,7 +2718,7 @@ abstract contract NFT721Market is
         override
         returns (address payable[] memory)
     {
-        require(_exists(id), "ERC721Metadata: Query for nonexistent token");
+        require(_exists(id), "ERC721Metadata:nonexistent token");
 
         address payable[] memory result = new address payable[](2);
         result[0] = getFoundationTreasury();
@@ -3012,14 +2730,14 @@ abstract contract NFT721Market is
      * @notice Returns an array of fees in basis points.
      * The expected recipients is communicated with `getFeeRecipients`.
      */
-    function getFeeBps(
-        uint256 /* id */
+    function getFeeBps(address nftMarket,
+        uint256  tokenId
     ) public view override returns (uint256[] memory) {
         (
             ,
             uint256 secondaryF8nFeeBasisPoints,
             uint256 secondaryCreatorFeeBasisPoints
-        ) = nftMarket.getFeeConfig();
+        ) = IFNDNFTMarket(nftMarket).getFeeConfig(address(this), tokenId);
         uint256[] memory result = new uint256[](2);
         result[0] = secondaryF8nFeeBasisPoints;
         result[1] = secondaryCreatorFeeBasisPoints;
@@ -3030,7 +2748,7 @@ abstract contract NFT721Market is
      * @notice Get fee recipients and fees in a single call.
      * The data is the same as when calling getFeeRecipients and getFeeBps separately.
      */
-    function getFees(uint256 tokenId)
+    function getFees(address nftMarket, uint256 tokenId)
         public
         view
         returns (
@@ -3040,7 +2758,7 @@ abstract contract NFT721Market is
     {
         require(
             _exists(tokenId),
-            "ERC721Metadata: Query for nonexistent token"
+            "ERC721Metadata:nonexistent token"
         );
 
         recipients[0] = getFoundationTreasury();
@@ -3049,7 +2767,7 @@ abstract contract NFT721Market is
             ,
             uint256 secondaryF8nFeeBasisPoints,
             uint256 secondaryCreatorFeeBasisPoints
-        ) = nftMarket.getFeeConfig();
+        ) = IFNDNFTMarket(nftMarket).getFeeConfig(address(this), tokenId);
         feesInBasisPoints[0] = secondaryF8nFeeBasisPoints;
         feesInBasisPoints[1] = secondaryCreatorFeeBasisPoints;
     }
@@ -3065,15 +2783,13 @@ pragma solidity ^0.7.0;
  * @notice A mixin to extend the OpenZeppelin metadata implementation.
  */
 abstract contract NFT721Metadata is NFT721Creator {
-    using StringsUpgradeable for uint256;
 
     /**
      * @dev Stores hashes minted by a creator to prevent duplicates.
      */
     mapping(address => mapping(string => bool))
         private creatorToIPFSHashToMinted;
-
-    event BaseURIUpdated(string baseURI);
+        
     event TokenIPFSPathUpdated(
         uint256 indexed tokenId,
         string indexed indexedTokenIPFSPath,
@@ -3092,7 +2808,7 @@ abstract contract NFT721Metadata is NFT721Creator {
     {
         return _tokenURIs[tokenId];
     }
-
+    
     /**
      * @notice Checks if the creator has already minted a given NFT.
      */
@@ -3103,10 +2819,20 @@ abstract contract NFT721Metadata is NFT721Creator {
         return creatorToIPFSHashToMinted[creator][tokenIPFSPath];
     }
 
+    /**
+     * @notice Returns the royalty for a given tokenId
+     */
+    function getTokenRoyalty(uint256 tokenId)
+        public
+        view
+        returns (uint256) 
+    {
+        return _tokenRoyaltys[tokenId];
+    }
+
     function _updateBaseURI(string memory _baseURI) internal {
         _setBaseURI(_baseURI);
 
-        emit BaseURIUpdated(_baseURI);
     }
 
     /**
@@ -3125,31 +2851,11 @@ abstract contract NFT721Metadata is NFT721Creator {
             !creatorToIPFSHashToMinted[msg.sender][_tokenIPFSPath],
             "NFT721Metadata: NFT was already minted"
         );
+        if (creatorToIPFSHashToMinted[msg.sender][getTokenIPFSPath(tokenId)])
+            creatorToIPFSHashToMinted[msg.sender][
+                getTokenIPFSPath(tokenId)
+            ] = false;
 
-        creatorToIPFSHashToMinted[msg.sender][_tokenIPFSPath] = true;
-        _setTokenURI(tokenId, _tokenIPFSPath);
-    }
-
-    /**
-     * @dev The IPFS path should be the CID + file.extension, e.g.
-     * `QmfPsfGwLhiJrU8t9HpG4wuyjgPo9bk8go4aQqSu9Qg4h7/metadata.json`
-     */
-    function _updateTokenIPFSPath(uint256 tokenId, string memory _tokenIPFSPath)
-        internal
-    {
-        // 46 is the minimum length for an IPFS content hash, it may be longer if paths are used
-        require(
-            bytes(_tokenIPFSPath).length >= 46,
-            "NFT721Metadata: Invalid IPFS path"
-        );
-        require(
-            !creatorToIPFSHashToMinted[msg.sender][_tokenIPFSPath],
-            "NFT721Metadata: NFT was already minted"
-        );
-
-        creatorToIPFSHashToMinted[msg.sender][
-            getTokenIPFSPath(tokenId)
-        ] = false;
         creatorToIPFSHashToMinted[msg.sender][_tokenIPFSPath] = true;
         _setTokenURI(tokenId, _tokenIPFSPath);
     }
@@ -3180,18 +2886,18 @@ abstract contract NFT721Mint is
     NFT721Metadata,
     FoundationAdminRole
 {
-    //   using AddressLibrary for address;
+    // using AddressLibrary for address;
     address private collectionCreator;
     uint256 private nextTokenId;
-
-    //  mapping(address => bool) public whitelisted;
-    event NftMarketUpdated(address indexed nftMarket);
+    using SafeMathUpgradeable for uint256;
 
     event Minted(
         address indexed creator,
         uint256 indexed tokenId,
         string indexed indexedTokenIPFSPath,
-        string tokenIPFSPath
+        string tokenIPFSPath,
+        uint256 royalty,
+        address marketContract
     );
 
     event Updated(
@@ -3201,16 +2907,6 @@ abstract contract NFT721Mint is
         string tokenIPFSPath
     );
 
-    using AddressUpgradeable for address;
-
-    /**
-     * @dev Called once after the initial deployment to register the collection contract creator address
-     */
-
-    function initializeCreator(address _collectionCreator) internal {
-        collectionCreator = _collectionCreator;
-    }
-
     /**
      * @dev Modifier to protect an initializer function from being invoked twice.
      */
@@ -3218,7 +2914,7 @@ abstract contract NFT721Mint is
     modifier onlyCollectionCreator() {
         require(
             msg.sender == collectionCreator,
-            "Address is not the collection creator"
+            "NFT721Mint:MINT_ADDRESS_NOT_AUTHORIZED"
         );
         _;
     }
@@ -3233,24 +2929,43 @@ abstract contract NFT721Mint is
     /**
      * @dev Called once after the initial deployment to set the initial tokenId.
      */
-    function _initializeNFT721Mint() internal initializer {
+    function _initializeNFT721Mint(address _collectionCreator)
+        internal
+        initializer
+    {
         // Use ID 1 for the first NFT tokenId
         nextTokenId = 1;
+        collectionCreator = _collectionCreator;
     }
 
     /**
      * @notice Allows a creator to mint an NFT.
      */
-    function mint(string memory tokenIPFSPath)
+    function mint(string memory tokenIPFSPath, uint256 royalty, address marketContract)
         public
         onlyCollectionCreator
         returns (uint256 tokenId)
     {
+       (
+           ,
+            uint256 secondaryF8nFeeBasisPoints
+       ) = IFNDNFTMarket(marketContract).getFoundationFees();
+    
+       require(secondaryF8nFeeBasisPoints.add(royalty) < 10000, "Fees >= 100%");     
+        
         tokenId = nextTokenId++;
+        if (_supply != 0) {
+            require(
+                tokenId <= _supply,
+                "NFT721Mint:MINT_LIMIT_TOTALSUPPLY"
+            );
+        }
+        
+        _setTokenRoyalty(tokenId, royalty);
         _mint(msg.sender, tokenId);
         _updateTokenCreator(tokenId, msg.sender);
         _setTokenIPFSPath(tokenId, tokenIPFSPath);
-        emit Minted(msg.sender, tokenId, tokenIPFSPath, tokenIPFSPath);
+        emit Minted(msg.sender, tokenId, tokenIPFSPath, tokenIPFSPath, royalty,marketContract);
     }
 
     /**
@@ -3258,13 +2973,12 @@ abstract contract NFT721Mint is
      * This can be used by creators the first time they mint an NFT to save having to issue a separate
      * approval transaction before starting an auction.
      */
-    function mintAndApproveMarket(string memory tokenIPFSPath)
+    function mintAndApproveMarket(string memory tokenIPFSPath, uint256 royalty, address marketContract)
         public
-        onlyCollectionCreator
         returns (uint256 tokenId)
     {
-        tokenId = mint(tokenIPFSPath);
-        setApprovalForAll(getNFTMarket(), true);
+        tokenId = mint(tokenIPFSPath, royalty, marketContract);
+        setApprovalForAll(marketContract, true);
     }
 
     /**
@@ -3272,14 +2986,36 @@ abstract contract NFT721Mint is
      */
     function mintWithCreatorPaymentAddress(
         string memory tokenIPFSPath,
-        address payable tokenCreatorPaymentAddress
+        address payable tokenCreatorPaymentAddress,
+        uint256 royalty,
+        address marketContract
     ) public onlyCollectionCreator returns (uint256 tokenId) {
         require(
             tokenCreatorPaymentAddress != address(0),
-            "NFT721Mint: tokenCreatorPaymentAddress is required"
+            "NFT721Mint:TOKEN_CREATOR_PAYMENT_ADDRESS_IS_REQUIRED"
         );
-        tokenId = mint(tokenIPFSPath);
+        tokenId = mint(tokenIPFSPath, royalty, marketContract);
         _setTokenCreatorPaymentAddress(tokenId, tokenCreatorPaymentAddress);
+    }
+
+    /**
+     * @notice Allows a creator to mint an NFT and have creator revenue/royalties sent to an alternate address.
+     * Also sets approval for the Foundation marketplace.  This can be used by creators the first time they mint an NFT to
+     * save having to issue a separate approval transaction before starting an auction.
+     */
+    function mintWithCreatorPaymentAddressAndApproveMarket(
+        string memory tokenIPFSPath,
+        address payable tokenCreatorPaymentAddress, 
+        uint256 royalty,
+        address marketContract
+    ) public returns (uint256 tokenId) {
+        tokenId = mintWithCreatorPaymentAddress(
+            tokenIPFSPath,
+            tokenCreatorPaymentAddress,
+            royalty,
+            marketContract
+        );
+        setApprovalForAll(marketContract, true);
     }
 
     /**
@@ -3289,8 +3025,8 @@ abstract contract NFT721Mint is
         public
     {
         address owner = ownerOf(tokenId);
-        require(msg.sender == owner, "Not Authorized");
-        _updateTokenIPFSPath(tokenId, tokenIPFSPath);
+        require(msg.sender == owner, "NFT721Mint:ADDRESS_NOT_AUTHORIZED");
+        _setTokenIPFSPath(tokenId, tokenIPFSPath);
         emit Updated(msg.sender, tokenId, tokenIPFSPath, tokenIPFSPath);
     }
 
@@ -3310,55 +3046,14 @@ abstract contract NFT721Mint is
 
 // File contracts/FNDNFT721.sol
 
-/*
-  ･
-   *　★
-      ･ ｡
-        　･　ﾟ☆ ｡
-  　　　 *　★ ﾟ･｡ *  ｡
-          　　* ☆ ｡･ﾟ*.｡
-      　　　ﾟ *.｡☆｡★　･
-​
-                      `                     .-:::::-.`              `-::---...```
-                     `-:`               .:+ssssoooo++//:.`       .-/+shhhhhhhhhhhhhyyyssooo:
-                    .--::.            .+ossso+/////++/:://-`   .////+shhhhhhhhhhhhhhhhhhhhhy
-                  `-----::.         `/+////+++///+++/:--:/+/-  -////+shhhhhhhhhhhhhhhhhhhhhy
-                 `------:::-`      `//-.``.-/+ooosso+:-.-/oso- -////+shhhhhhhhhhhhhhhhhhhhhy
-                .--------:::-`     :+:.`  .-/osyyyyyyso++syhyo.-////+shhhhhhhhhhhhhhhhhhhhhy
-              `-----------:::-.    +o+:-.-:/oyhhhhhhdhhhhhdddy:-////+shhhhhhhhhhhhhhhhhhhhhy
-             .------------::::--  `oys+/::/+shhhhhhhdddddddddy/-////+shhhhhhhhhhhhhhhhhhhhhy
-            .--------------:::::-` +ys+////+yhhhhhhhddddddddhy:-////+yhhhhhhhhhhhhhhhhhhhhhy
-          `----------------::::::-`.ss+/:::+oyhhhhhhhhhhhhhhho`-////+shhhhhhhhhhhhhhhhhhhhhy
-         .------------------:::::::.-so//::/+osyyyhhhhhhhhhys` -////+shhhhhhhhhhhhhhhhhhhhhy
-       `.-------------------::/:::::..+o+////+oosssyyyyyyys+`  .////+shhhhhhhhhhhhhhhhhhhhhy
-       .--------------------::/:::.`   -+o++++++oooosssss/.     `-//+shhhhhhhhhhhhhhhhhhhhyo
-     .-------   ``````.......--`        `-/+ooooosso+/-`          `./++++///:::--...``hhhhyo
-                                              `````
-   *　
-      ･ ｡
-　　　　･　　ﾟ☆ ｡
-  　　　 *　★ ﾟ･｡ *  ｡
-          　　* ☆ ｡･ﾟ*.｡
-      　　　ﾟ *.｡☆｡★　･
-    *　　ﾟ｡·*･｡ ﾟ*
-  　　　☆ﾟ･｡°*. ﾟ
-　 ･ ﾟ*｡･ﾟ★｡
-　　･ *ﾟ｡　　 *
-　･ﾟ*｡★･
- ☆∴｡　*
-･ ｡
-*/
-
 pragma solidity ^0.7.0;
 
 /**
  * @title Foundation NFTs implemented using the ERC-721 standard.
  * @dev This top level file holds no data directly to ease future upgrades.
  */
-contract Bling_Collection is
+contract BlingCollection is
     FoundationTreasuryNode,
-    FoundationOperatorRole,
-    AccountMigration,
     ERC165Upgradeable,
     HasSecondarySaleFees,
     ERC721Upgradeable,
@@ -3384,18 +3079,17 @@ contract Bling_Collection is
         string memory symbol,
         uint256 supply,
         address collectionCreator
-    ) public initializer {
-        require(msg.sender == blingMaster, "Not Authorized");
-        HasSecondarySaleFees._initializeHasSecondarySaleFees(); // Leave
-        NFT721Creator._initializeNFT721Creator(); // leave
-        NFT721Mint._initializeNFT721Mint();
-        NFT721Mint.initializeCreator(collectionCreator);
+     ) public initializer {
+        require(msg.sender == blingMaster, "BlingCollection:ADDRESS_NOT_AUTHORIZED");
+        HasSecondarySaleFees._initializeHasSecondarySaleFees(); 
+        NFT721Creator._initializeNFT721Creator();
+        NFT721Mint._initializeNFT721Mint(collectionCreator);
         FoundationTreasuryNode._initializeFoundationTreasuryNode(treasury);
         ERC721Upgradeable.__ERC721_init(name, symbol, supply);
     }
 
-    function masterUpdateSupply(uint256 _supply) public {
-        require(msg.sender == blingMaster, "Not Authorized");
+    function adminUpdateSupply(uint256 _supply) public {
+        require(msg.sender == blingMaster, "BlingCollection:ADDRESS_NOT_AUTHORIZED");
         ERC721Upgradeable._updateSupply(_supply);
     }
 
@@ -3403,11 +3097,13 @@ contract Bling_Collection is
      * @notice Allows a Foundation admin to update NFT config variables.
      * @dev This must be called right after the initial call to `initialize`.
      */
-    function adminUpdateConfig(address _nftMarket, string memory baseURI)
+    function adminUpdateConfig(string memory baseURI)
         public
     {
-        require(msg.sender == blingMaster || _isFoundationAdmin());
-        _updateNFTMarket(_nftMarket);
+        require(
+            msg.sender == blingMaster || _isFoundationAdmin(),
+            "BlingCollection:ADDRESS_NOT_AUTHORIZED"
+        );
         _updateBaseURI(baseURI);
     }
 

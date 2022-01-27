@@ -1,4 +1,8 @@
 /**
+ *Submitted for verification at polygonscan.com on 2021-12-17
+ */
+
+/**
  *Submitted for verification at polygonscan.com on 2021-10-20
  */
 
@@ -1017,6 +1021,11 @@ interface IFNDNFT721 {
         external
         view
         returns (address payable);
+
+    function getTokenRoyalty(uint256 tokenId)
+        external
+        view
+        returns (uint256);
 }
 
 // File contracts/mixins/NFTMarketCreators.sol
@@ -1106,13 +1115,11 @@ abstract contract NFTMarketFees is
 
     event MarketFeesUpdated(
         uint256 primaryFoundationFeeBasisPoints,
-        uint256 secondaryFoundationFeeBasisPoints,
-        uint256 secondaryCreatorFeeBasisPoints
+        uint256 secondaryFoundationFeeBasisPoints
     );
 
     uint256 private _primaryFoundationFeeBasisPoints;
     uint256 private _secondaryFoundationFeeBasisPoints;
-    uint256 private _secondaryCreatorFeeBasisPoints;
 
     mapping(address => mapping(uint256 => bool))
         private nftContractToTokenIdToFirstSaleCompleted;
@@ -1152,7 +1159,7 @@ abstract contract NFTMarketFees is
     /**
      * @notice Returns the current fee configuration in basis points.
      */
-    function getFeeConfig()
+    function getFeeConfig(address nftContract, uint256 tokenId)
         public
         view
         returns (
@@ -1164,7 +1171,23 @@ abstract contract NFTMarketFees is
         return (
             _primaryFoundationFeeBasisPoints,
             _secondaryFoundationFeeBasisPoints,
-            _secondaryCreatorFeeBasisPoints
+            IFNDNFT721(nftContract).getTokenRoyalty(tokenId)
+        );
+    }
+
+    /**
+     * @notice Returns the fees of foundation in basis points
+     */
+
+    function getFoundationFees() public 
+    view 
+    returns(uint256 primaryFoundationFeeBasisPoints, 
+    uint256 secondaryFoundationFeeBasisPoints
+    )
+    {
+        return (
+            _primaryFoundationFeeBasisPoints,
+            _secondaryFoundationFeeBasisPoints
         );
     }
 
@@ -1224,13 +1247,14 @@ abstract contract NFTMarketFees is
             // On a primary sale, the creator is paid the remainder via `ownerRev`.
             ownerRevTo = tokenCreatorPaymentAddress;
         } else {
+            uint256 secondaryCreatorFeeBasisPoints = IFNDNFT721(nftContract).getTokenRoyalty(tokenId);
             foundationFeeBasisPoints = _secondaryFoundationFeeBasisPoints;
 
             // If there is no creator then funds go to the seller instead.
             if (tokenCreatorPaymentAddress != address(0)) {
                 // SafeMath is not required when dividing by a constant value > 0.
                 creatorSecondaryFee =
-                    price.mul(_secondaryCreatorFeeBasisPoints) /
+                    price.mul(secondaryCreatorFeeBasisPoints) /
                     BASIS_POINTS;
                 creatorSecondaryFeeTo = tokenCreatorPaymentAddress;
             }
@@ -1295,32 +1319,173 @@ abstract contract NFTMarketFees is
         );
     }
 
+
     /**
      * @notice Allows Foundation to change the market fees.
      */
     function _updateMarketFees(
         uint256 primaryFoundationFeeBasisPoints,
-        uint256 secondaryFoundationFeeBasisPoints,
-        uint256 secondaryCreatorFeeBasisPoints
+        uint256 secondaryFoundationFeeBasisPoints
     ) internal {
         require(
             primaryFoundationFeeBasisPoints < BASIS_POINTS,
             "NFTMarketFees: Fees >= 100%"
         );
+
         require(
-            secondaryFoundationFeeBasisPoints.add(
-                secondaryCreatorFeeBasisPoints
-            ) < BASIS_POINTS,
+            secondaryFoundationFeeBasisPoints < BASIS_POINTS,
             "NFTMarketFees: Fees >= 100%"
         );
+
         _primaryFoundationFeeBasisPoints = primaryFoundationFeeBasisPoints;
         _secondaryFoundationFeeBasisPoints = secondaryFoundationFeeBasisPoints;
-        _secondaryCreatorFeeBasisPoints = secondaryCreatorFeeBasisPoints;
 
         emit MarketFeesUpdated(
             primaryFoundationFeeBasisPoints,
-            secondaryFoundationFeeBasisPoints,
-            secondaryCreatorFeeBasisPoints
+            secondaryFoundationFeeBasisPoints
+        );
+    }
+
+    uint256[1000] private ______gap;
+}
+
+pragma solidity ^0.7.0;
+
+/**
+ * @notice Adds support for a private sale of an NFT directly between two parties.
+ */
+abstract contract NFTMarketPrivateSale is NFTMarketFees {
+    /**
+     * @dev This name is used in the EIP-712 domain.
+     * If multiple classes use EIP-712 signatures in the future this can move to the shared constants file.
+     */
+    string private constant NAME = "BlingMarket";
+    /**
+     * @dev This is a hash of the method signature used in the EIP-712 signature for private sales.
+     */
+    bytes32 private constant BUY_FROM_PRIVATE_SALE_TYPEHASH =
+        keccak256(
+            "BuyFromPrivateSale(address nftContract,uint256 tokenId,address buyer,uint256 price,uint256 deadline)"
+        );
+
+    /**
+     * @dev This is the domain used in EIP-712 signatures.
+     * It is not a constant so that the chainId can be determined dynamically.
+     * If multiple classes use EIP-712 signatures in the future this can move to a shared file.
+     */
+    bytes32 private DOMAIN_SEPARATOR;
+
+    event PrivateSaleFinalized(
+        address paymentMode,
+        address indexed nftContract,
+        uint256 indexed tokenId,
+        address indexed seller,
+        address buyer,
+        uint256 creatorFee,
+        uint256 ownerRev,
+        uint256 deadline
+    );
+
+    /**
+     * @dev This function must be called at least once before signatures will work as expected.
+     * It's okay to call this function many times. Subsequent calls will have no impact.
+     */
+    function _reinitialize() internal {
+        uint256 chainId;
+        // solhint-disable-next-line no-inline-assembly
+        assembly {
+            chainId := chainid()
+        }
+        DOMAIN_SEPARATOR = keccak256(
+            abi.encode(
+                keccak256(
+                    "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
+                ),
+                keccak256(bytes(NAME)),
+                keccak256(bytes("1")),
+                chainId,
+                address(this)
+            )
+        );
+    }
+
+    /**
+     * @notice Allow two parties to execute a private sale.
+     * @dev The seller signs a message approving the sale, and then the buyer calls this function
+     * with the msg.value equal to the agreed upon price.
+     * The sale is executed in this single on-chain call including the transfer of funds and the NFT.
+     */
+    function buyFromPrivateSale(
+        IERC721Upgradeable nftContract,
+        address paymentMode,
+        uint256 amount,
+        uint256 tokenId,
+        uint256 deadline,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) public payable {
+        // The signed message from the seller is only valid for a limited time.
+        require(deadline >= block.timestamp, "NFTMarketPrivateSale:EXPIRED");
+        // The seller must have the NFT in their wallet when this function is called.
+        address payable seller = payable(nftContract.ownerOf(tokenId));
+
+        if (paymentMode == address(0)) amount = msg.value;
+
+        // Scoping this block to avoid a stack too deep error
+        {
+            bytes32 digest = keccak256(
+                abi.encodePacked(
+                    "\x19\x01",
+                    DOMAIN_SEPARATOR,
+                    keccak256(
+                        abi.encode(
+                            BUY_FROM_PRIVATE_SALE_TYPEHASH,
+                            nftContract,
+                            tokenId,
+                            msg.sender,
+                            amount,
+                            deadline
+                        )
+                    )
+                )
+            );
+
+            digest = keccak256(
+                abi.encodePacked("\x19Ethereum Signed Message:\n32", digest)
+            );
+    
+            // Revert if the signature is invalid, the terms are not as expected, or if the seller transferred the NFT.
+            require(
+                ecrecover(digest, v, r, s) == seller,
+                "NFTMarketPrivateSale:INVALID_SIGNATURE"
+            );
+        }
+
+        // This will revert if the seller has not given the market contract approval.
+        nftContract.transferFrom(seller, msg.sender, tokenId);
+        // Pay the seller, creator, and Foundation as appropriate.
+        (
+             ,
+            uint256 creatorFee,
+            uint256 ownerRev
+        ) = _distributeFunds(
+                paymentMode,
+                address(nftContract),
+                tokenId,
+                seller,
+                amount
+            );
+
+        emit PrivateSaleFinalized(
+            paymentMode,
+            address(nftContract),
+            tokenId,
+            seller,
+            msg.sender,
+            creatorFee,
+            ownerRev,
+            deadline
         );
     }
 
@@ -1783,34 +1948,93 @@ abstract contract AccountMigration is FoundationOperatorRole {
     }
 }
 
+// OpenZeppelin Contracts v4.4.1 (token/ERC20/IERC20.sol)
+
 /**
- * @title ERC20 interface
- * @dev see https://github.com/ethereum/EIPs/issues/20
+ * @dev Interface of the ERC20 standard as defined in the EIP.
  */
 interface IERC20 {
-    function name() external returns (string memory);
+    /**
+     * @dev Returns the name of token.
+     */
+    function name() external view returns (string memory);
 
-    function transfer(address to, uint256 value) external returns (bool);
-
-    function approve(address spender, uint256 value) external returns (bool);
-
-    function transferFrom(
-        address from,
-        address to,
-        uint256 value
-    ) external returns (bool);
-
+    /**
+     * @dev Returns the amount of tokens in existence.
+     */
     function totalSupply() external view returns (uint256);
 
-    function balanceOf(address who) external view returns (uint256);
+    /**
+     * @dev Returns the amount of tokens owned by `account`.
+     */
+    function balanceOf(address account) external view returns (uint256);
 
+    /**
+     * @dev Moves `amount` tokens from the caller's account to `recipient`.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * Emits a {Transfer} event.
+     */
+    function transfer(address recipient, uint256 amount)
+        external
+        returns (bool);
+
+    /**
+     * @dev Returns the remaining number of tokens that `spender` will be
+     * allowed to spend on behalf of `owner` through {transferFrom}. This is
+     * zero by default.
+     *
+     * This value changes when {approve} or {transferFrom} are called.
+     */
     function allowance(address owner, address spender)
         external
         view
         returns (uint256);
 
+    /**
+     * @dev Sets `amount` as the allowance of `spender` over the caller's tokens.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * IMPORTANT: Beware that changing an allowance with this method brings the risk
+     * that someone may use both the old and the new allowance by unfortunate
+     * transaction ordering. One possible solution to mitigate this race
+     * condition is to first reduce the spender's allowance to 0 and set the
+     * desired value afterwards:
+     * https://github.com/ethereum/EIPs/issues/20#issuecomment-263524729
+     *
+     * Emits an {Approval} event.
+     */
+    function approve(address spender, uint256 amount) external returns (bool);
+
+    /**
+     * @dev Moves `amount` tokens from `sender` to `recipient` using the
+     * allowance mechanism. `amount` is then deducted from the caller's
+     * allowance.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * Emits a {Transfer} event.
+     */
+    function transferFrom(
+        address sender,
+        address recipient,
+        uint256 amount
+    ) external returns (bool);
+
+    /**
+     * @dev Emitted when `value` tokens are moved from one account (`from`) to
+     * another (`to`).
+     *
+     * Note that `value` may be zero.
+     */
     event Transfer(address indexed from, address indexed to, uint256 value);
 
+    /**
+     * @dev Emitted when the allowance of a `spender` for an `owner` is set by
+     * a call to {approve}. `value` is the new allowance.
+     */
     event Approval(
         address indexed owner,
         address indexed spender,
@@ -1880,14 +2104,14 @@ abstract contract NFTMarketReserveAuction is
         uint256 indexed tokenId,
         uint256 reservePrice,
         uint256 auctionId,
-        address paymentMode,
-        string name
+        address paymentMode
     );
     event ReserveAuctionUpdated(
         uint256 indexed auctionId,
         uint256 reservePrice
     );
     event ReserveAuctionCanceled(uint256 indexed auctionId);
+    
     event ReserveAuctionBidPlaced(
         uint256 indexed auctionId,
         address indexed bidder,
@@ -1911,7 +2135,11 @@ abstract contract NFTMarketReserveAuction is
         address indexed originalSellerAddress,
         address indexed newSellerAddress
     );
-    event TokenAdded(address[] indexed tokenAddress, bool[] indexed status);
+    event TokenUpdated(
+        address indexed tokenAddress,
+        bool indexed status,
+        string name
+    );
 
     modifier onlyValidAuctionConfig(uint256 reservePrice) {
         require(
@@ -1976,10 +2204,6 @@ abstract contract NFTMarketReserveAuction is
         duration = EXTENSION_DURATION;
     }
 
-    // function _initializeNFTMarketReserveAuction() internal {
-    //     _duration = 24 hours; // A sensible default value
-    // }
-
     function _updateReserveAuctionConfig(
         uint256 minPercentIncrementInBasisPoints,
         uint256 duration
@@ -2014,13 +2238,13 @@ abstract contract NFTMarketReserveAuction is
         uint256 endDate,
         address paymentMode
     ) public onlyValidAuctionConfig(reservePrice) nonReentrant {
-        require(tokens[paymentMode], "NFTMarketReserveAuction: Token not supported");
+        require(tokens[paymentMode], "NFTMarketReserveAuction:TOKEN_NOT_SUPPORTED");
         // If an auction is already in progress then the NFT would be in escrow and the modifier would have failed
         uint256 extraTimeForExecution = 10 minutes;
         require(
             startDate + extraTimeForExecution > block.timestamp &&
                 endDate > startDate + EXTENSION_DURATION,
-            "NFTMarketReserveAuction: endDate must be > startDate + auction duration"
+            "NFTMarketReserveAuction:INVALID_ENDDATE"
         );
         uint256 auctionId = _getNextAndIncrementAuctionId();
         nftContractToTokenIdToAuctionId[nftContract][tokenId] = auctionId;
@@ -2041,25 +2265,13 @@ abstract contract NFTMarketReserveAuction is
             tokenId
         );
 
-        if (paymentMode == address(0))
-            emit ReserveAuctionCreated(
+        emit ReserveAuctionCreated(
                 msg.sender,
                 nftContract,
                 tokenId,
                 reservePrice,
                 auctionId,
-                paymentMode,
-                "MATIC"
-            );
-        else
-            emit ReserveAuctionCreated(
-                msg.sender,
-                nftContract,
-                tokenId,
-                reservePrice,
-                auctionId,
-                paymentMode,
-                IERC20(paymentMode).name()
+                paymentMode
             );
     }
 
@@ -2074,11 +2286,11 @@ abstract contract NFTMarketReserveAuction is
         ReserveAuction storage auction = auctionIdToAuction[auctionId];
         require(
             auction.seller == msg.sender,
-            "NFTMarketReserveAuction: Not your auction"
+            "NFTMarketReserveAuction:NOT_YOUR_AUCTION"
         );
         require(
             auction.startTime > block.timestamp,
-            "NFTMarketReserveAuction: Auction in progress"
+            "NFTMarketReserveAuction:AUCTION_IN_PROGRESS"
         );
 
         auction.amount = reservePrice;
@@ -2094,11 +2306,11 @@ abstract contract NFTMarketReserveAuction is
         ReserveAuction memory auction = auctionIdToAuction[auctionId];
         require(
             auction.seller == msg.sender,
-            "NFTMarketReserveAuction: Not your auction"
+            "NFTMarketReserveAuction:CANCEL_NOT_ALLOWED_DIFFERENT_OWNER"
         );
         require(
             auction.bidder == address(0),
-            "NFTMarketReserveAuction: Auction in progress"
+            "NFTMarketReserveAuction:AUCTION_IN_PROGRESS"
         );
 
         delete nftContractToTokenIdToAuctionId[auction.nftContract][
@@ -2129,12 +2341,12 @@ abstract contract NFTMarketReserveAuction is
         ReserveAuction storage auction = auctionIdToAuction[auctionId];
         require(
             auction.amount != 0,
-            "NFTMarketReserveAuction: Auction not found"
+            "NFTMarketReserveAuction:AUCTION_NOT_FOUND"
         );
         require(
             auction.startTime <= block.timestamp &&
                 auction.endTime >= block.timestamp,
-            "NFTMarketReserveAuction: Auction not started / ended"
+            "NFTMarketReserveAuction:AUCTION_NOT_LIVE"
         );
 
         uint256 minAmount = _getMinBidAmountForReserveAuction(auction.amount);
@@ -2143,7 +2355,7 @@ abstract contract NFTMarketReserveAuction is
         }
         require(
             amount >= minAmount,
-            "NFTMarketReserveAuction: Bid amount too low"
+            "NFTMarketReserveAuction:BID_AMOUNT_TOO_LOW"
         );
 
         // Cache and update bidder state before a possible reentrancy (via the value transfer)
@@ -2184,11 +2396,11 @@ abstract contract NFTMarketReserveAuction is
         ReserveAuction memory auction = auctionIdToAuction[auctionId];
         require(
             auction.endTime > 0,
-            "NFTMarketReserveAuction: Auction was already settled"
+            "NFTMarketReserveAuction:AUCTION_ALREADY_SETTLED"
         );
         require(
             auction.endTime < block.timestamp,
-            "NFTMarketReserveAuction: Auction still in progress"
+            "NFTMarketReserveAuction:AUCTION_IN_PROGRESS"
         );
 
         delete nftContractToTokenIdToAuctionId[auction.nftContract][
@@ -2256,14 +2468,20 @@ abstract contract NFTMarketReserveAuction is
     /**
      * @notice Allows Foundation to add token address.
      */
-    function adminAddToken(address[] memory tokenAddress, bool[] memory status)
+    function adminUpdateToken(address tokenAddress, bool status)
         public
         onlyFoundationAdmin
     {
-        for (uint160 i; i < tokenAddress.length; i++) {
-            tokens[tokenAddress[i]] = status[i];
+        tokens[tokenAddress] = status;
+        if (tokenAddress == address(0)) {
+            emit TokenUpdated(tokenAddress, status, "Matic");
+        } else {
+            emit TokenUpdated(
+                tokenAddress,
+                status,
+                IERC20(tokenAddress).name()
+            );
         }
-        emit TokenAdded(tokenAddress, status);
     }
 
     /**
@@ -2276,12 +2494,12 @@ abstract contract NFTMarketReserveAuction is
     {
         require(
             bytes(reason).length > 0,
-            "NFTMarketReserveAuction: Include a reason for this cancellation"
+            "NFTMarketReserveAuction:INCLUDE_A_REASON_FOR_THIS_CANCELLATION"
         );
         ReserveAuction memory auction = auctionIdToAuction[auctionId];
         require(
             auction.amount > 0,
-            "NFTMarketReserveAuction: Auction not found"
+            "NFTMarketReserveAuction:AUCTION_NOT_FOUND"
         );
 
         delete nftContractToTokenIdToAuctionId[auction.nftContract][
@@ -2328,7 +2546,7 @@ abstract contract NFTMarketReserveAuction is
             if (auction.seller != address(0)) {
                 require(
                     auction.seller == originalAddress,
-                    "NFTMarketReserveAuction: Auction not created by that address"
+                    "NFTMarketReserveAuction:AUCTION_NOT_CREATED_BY_THAT_ADDRESS"
                 );
                 auction.seller = newAddress;
                 emit ReserveAuctionSellerMigrated(
@@ -2344,45 +2562,6 @@ abstract contract NFTMarketReserveAuction is
 }
 
 // File contracts/FNDNFTMarket.sol
-
-/*
-  ･
-   *　★
-      ･ ｡
-        　･　ﾟ☆ ｡
-  　　　 *　★ ﾟ･｡ *  ｡
-          　　* ☆ ｡･ﾟ*.｡
-      　　　ﾟ *.｡☆｡★　･
-​
-                      `                     .-:::::-.`              `-::---...```
-                     `-:`               .:+ssssoooo++//:.`       .-/+shhhhhhhhhhhhhyyyssooo:
-                    .--::.            .+ossso+/////++/:://-`   .////+shhhhhhhhhhhhhhhhhhhhhy
-                  `-----::.         `/+////+++///+++/:--:/+/-  -////+shhhhhhhhhhhhhhhhhhhhhy
-                 `------:::-`      `//-.``.-/+ooosso+:-.-/oso- -////+shhhhhhhhhhhhhhhhhhhhhy
-                .--------:::-`     :+:.`  .-/osyyyyyyso++syhyo.-////+shhhhhhhhhhhhhhhhhhhhhy
-              `-----------:::-.    +o+:-.-:/oyhhhhhhdhhhhhdddy:-////+shhhhhhhhhhhhhhhhhhhhhy
-             .------------::::--  `oys+/::/+shhhhhhhdddddddddy/-////+shhhhhhhhhhhhhhhhhhhhhy
-            .--------------:::::-` +ys+////+yhhhhhhhddddddddhy:-////+yhhhhhhhhhhhhhhhhhhhhhy
-          `----------------::::::-`.ss+/:::+oyhhhhhhhhhhhhhhho`-////+shhhhhhhhhhhhhhhhhhhhhy
-         .------------------:::::::.-so//::/+osyyyhhhhhhhhhys` -////+shhhhhhhhhhhhhhhhhhhhhy
-       `.-------------------::/:::::..+o+////+oosssyyyyyyys+`  .////+shhhhhhhhhhhhhhhhhhhhhy
-       .--------------------::/:::.`   -+o++++++oooosssss/.     `-//+shhhhhhhhhhhhhhhhhhhhyo
-     .-------   ``````.......--`        `-/+ooooosso+/-`          `./++++///:::--...``hhhhyo
-                                              `````
-   *　
-      ･ ｡
-　　　　･　　ﾟ☆ ｡
-  　　　 *　★ ﾟ･｡ *  ｡
-          　　* ☆ ｡･ﾟ*.｡
-      　　　ﾟ *.｡☆｡★　･
-    *　　ﾟ｡·*･｡ ﾟ*
-  　　　☆ﾟ･｡°*. ﾟ
-　 ･ ﾟ*｡･ﾟ★｡
-　　･ *ﾟ｡　　 *
-　･ﾟ*｡★･
- ☆∴｡　*
-･ ｡
-*/
 
 pragma solidity ^0.7.0;
 pragma abicoder v2; // solhint-disable-line
@@ -2402,7 +2581,8 @@ contract BlingMarket is
     SendValueWithFallbackWithdraw,
     NFTMarketFees,
     NFTMarketAuction,
-    NFTMarketReserveAuction
+    NFTMarketReserveAuction,
+    NFTMarketPrivateSale
 {
     /**
      * @notice Called once to configure the contract after the initial deployment.
@@ -2411,7 +2591,6 @@ contract BlingMarket is
     function initialize(address payable treasury) public initializer {
         FoundationTreasuryNode._initializeFoundationTreasuryNode(treasury);
         NFTMarketAuction._initializeNFTMarketAuction();
-        // NFTMarketReserveAuction._initializeNFTMarketReserveAuction();
     }
 
     /**
@@ -2421,14 +2600,13 @@ contract BlingMarket is
         uint256 minPercentIncrementInBasisPoints,
         uint256 duration,
         uint256 primaryF8nFeeBasisPoints,
-        uint256 secondaryF8nFeeBasisPoints,
-        uint256 secondaryCreatorFeeBasisPoints
+        uint256 secondaryF8nFeeBasisPoints
     ) public onlyFoundationAdmin {
+        _reinitialize();
         _updateReserveAuctionConfig(minPercentIncrementInBasisPoints, duration);
         _updateMarketFees(
             primaryF8nFeeBasisPoints,
-            secondaryF8nFeeBasisPoints,
-            secondaryCreatorFeeBasisPoints
+            secondaryF8nFeeBasisPoints
         );
     }
 
